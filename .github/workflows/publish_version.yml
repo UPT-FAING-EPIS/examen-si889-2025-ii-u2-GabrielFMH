@@ -57,14 +57,12 @@ jobs:
           --collect:"XPlat Code Coverage" \
           --results-directory ./coverage
 
-    - name: Generate test report
-      uses: dorny/test-reporter@v1
-      if: success() || failure()
-      with:
-        name: Release Tests Results
-        path: '**/*.trx'
-        reporter: dotnet-trx
-        fail-on-error: true
+    - name: List test results
+      run: |
+        echo "Test results directory structure:"
+        find coverage/ -type f -name "*.xml" -o -name "*.trx" | head -10
+        echo "Coverage files:"
+        find coverage/ -name "*.xml" | head -5
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
