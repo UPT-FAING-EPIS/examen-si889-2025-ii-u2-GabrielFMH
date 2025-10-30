@@ -39,21 +39,25 @@ jobs:
     - name: Build project
       run: dotnet build --configuration Release --no-restore
     
-    - name: Install Coverlet Collector
-      run: dotnet tool install --global coverlet.collector
+    - name: Install Coverlet MSBuild
+      run: dotnet tool install --global coverlet.console
     
     - name: Run tests with coverage
       run: |
         dotnet test --configuration Release --no-build --verbosity normal \
         /p:CollectCoverage=true \
         /p:CoverletOutputFormat=cobertura \
-        /p:CoverletOutput=./coverage/
+        /p:CoverletOutput=./coverage/ \
+        /p:ExcludeByAttribute=Obsolete,GeneratedCodeAttribute,CompilerGeneratedAttribute \
+        /p:ExcludeByFile="**/Migrations/*.cs"
     
     - name: Install ReportGenerator
-      run: dotnet tool install --global dotnet-reportgenerator-globaltool
+      run: |
+        dotnet tool install --global dotnet-reportgenerator-globaltool --version 5.1.19
     
     - name: Generate coverage report
       run: |
+        mkdir -p coverage
         reportgenerator \
         -reports:**/coverage.cobertura.xml \
         -targetdir:coverage \
