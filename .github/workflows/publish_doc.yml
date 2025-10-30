@@ -1,4 +1,4 @@
-name: Generate Documentation and Publish to GitHub Pages
+name: Generate and Deploy Documentation
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
     branches: [ main, master ]
 
 permissions:
-  contents: write
+  contents: read
   pages: write
   id-token: write
 
@@ -16,130 +16,65 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  generate-documentation:
+  build-docs:
     runs-on: ubuntu-latest
-    
+
     steps:
-    - name: Checkout repository
+    - name: Checkout
       uses: actions/checkout@v4
-    
+      with:
+        fetch-depth: 0
+
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: '6.0.x'
-    
+
     - name: Restore dependencies
       run: dotnet restore
-    
+
     - name: Build project
       run: dotnet build --no-restore
-    
+
     - name: Run tests
       run: dotnet test --no-build --verbosity normal
-    
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '18'
-    
-    - name: Install DocFx
-      run: npm install -g docfx
-    
-    - name: Generate API Documentation
+
+    - name: Install DocFX
+      run: |
+        dotnet tool install -g docfx
+
+    - name: DocFX Init
       run: |
         mkdir -p docs
-        docfx metadata --force
-    
-    - name: Create PlantUML for Class Diagrams
+        cd docs
+        docfx init --yes
+
+    - name: Generate Metadata
       run: |
-        cat > docs/class-diagram.puml << 'EOF'
-@startuml OrderProcessingSystem
-!theme plain
+        cd docs
+        docfx metadata
 
-class InventoryService {
-  +CheckStock(productId: string): bool
-}
-
-class PaymentService {
-  +ProcessPayment(customerId: string, amount: decimal): bool
-}
-
-class ShippingService {
-  +ShipProduct(productId: string, address: string): void
-}
-
-class OrderFacade {
-  -_inventoryService: InventoryService
-  -_paymentService: PaymentService
-  -_shippingService: ShippingService
-  +OrderFacade()
-  +ProcessOrder(productId: string, customerId: string, amount: decimal, address: string): void
-}
-
-class OrderProcessor {
-  -_orderFacade: OrderFacade
-  +OrderProcessor()
-  +ProcessOrder(productId: string, customerId: string, amount: decimal, address: string): void
-}
-
-class OrderProcessorTests {
-  +ProcessOrder_ExecutesAllSteps(): void
-}
-
-OrderFacade --> InventoryService
-OrderFacade --> PaymentService  
-OrderFacade --> ShippingService
-OrderProcessor --> OrderFacade
-OrderProcessorTests --> OrderProcessor
-
-note right of OrderProcessor::ProcessOrder
-  Delega la lógica compleja al OrderFacade,
-  manteniendo una interfaz simple
-end note
-
-note right of OrderFacade::ProcessOrder
-  Encapsula la coordinación entre
-  InventoryService, PaymentService
-  y ShippingService
-end note
-
-@enduml
-EOF
-    
-    - name: Install PlantUML
+    - name: Build Documentation
       run: |
-        wget -O plantuml.jar https://github.com/plantuml/plantuml/releases/download/v1.2023.12/plantuml-1.2023.12.jar
-        chmod +x plantuml.jar
-    
-    - name: Generate Class Diagram PNG
-      run: |
-        java -jar plantuml.jar -tpng docs/class-diagram.puml -o docs/
-    
-    - name: Create Documentation Index
-      run: |
-        echo "Order Processing System - Documentation" > docs/README.md
-        echo "========================================" >> docs/README.md
-        echo "" >> docs/README.md
-        echo "Generated on: $(date)" >> docs/README.md
-        echo "Build: ${{ github.run_number }}" >> docs/README.md
-        echo "Commit: ${{ github.sha }}" >> docs/README.md
-        echo "" >> docs/README.md
-        echo "This project demonstrates the FACADE design pattern." >> docs/README.md
-        echo "See API documentation in docs/api/ and class diagram in docs/class-diagram.png" >> docs/README.md
-    
-    - name: Upload Documentation
+        cd docs
+        docfx build
+
+    - name: Setup Pages
+      uses: actions/configure-pages@v5
+
+    - name: Upload artifact
       uses: actions/upload-pages-artifact@v3
       with:
-        path: docs/
+        path: './docs/_site'
 
   deploy:
-    needs: generate-documentation
-    runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    
+    runs-on: ubuntu-latest
+    needs: build-docs
+
     steps:
-    - name: Deploy to GitHub Pages
-      id: deployment
-      uses: actions/deploy-pages@v4
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
