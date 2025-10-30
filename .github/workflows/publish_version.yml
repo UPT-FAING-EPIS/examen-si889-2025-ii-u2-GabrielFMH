@@ -2,6 +2,9 @@ name: Create Version Release
 
 on:
   push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
     tags:
       - 'v*.*.*'
   workflow_dispatch:
@@ -26,13 +29,14 @@ jobs:
       with:
         fetch-depth: 0
 
-    - name: Get version from tag
+    - name: Get version
       id: version
       run: |
         if [[ $GITHUB_REF == refs/tags/* ]]; then
           VERSION=${GITHUB_REF#refs/tags/}
         else
-          VERSION="${{ inputs.version_tag }}"
+          # Para ejecuciones manuales, usa el input. Si no, genera una versión dev.
+          VERSION="${{ inputs.version_tag || '0.0.0-dev' }}"
         fi
         echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
         echo "Version: $VERSION"
@@ -48,30 +52,43 @@ jobs:
     - name: Build project
       run: dotnet build --configuration ${{ env.BUILD_CONFIGURATION }} --no-restore
 
-    - name: Run tests with coverage
+    # --- INICIO DE LA CORRECCIÓN ---
+    - name: Run tests with coverage and generate report
       run: |
         dotnet test \
           --configuration ${{ env.BUILD_CONFIGURATION }} \
           --no-build \
           --verbosity normal \
           --collect:"XPlat Code Coverage" \
-          --results-directory ./coverage
+          --results-directory ./coverage \
+          --logger "trx;LogFileName=test-results.trx" # <-- LÍNEA AÑADIDA
 
-    - name: List test results
-      run: |
-        echo "Test results directory structure:"
-        find coverage/ -type f -name "*.xml" -o -name "*.trx" | head -10
-        echo "Coverage files:"
-        find coverage/ -name "*.xml" | head -5
+    # (Opcional pero recomendado) Paso para verificar que los archivos se crearon
+    - name: List files in coverage directory
+      run: ls -R ./coverage
+
+    - name: Generate test report
+      uses: dorny/test-reporter@v1
+      # Ejecutar siempre para que reporte fallos si los hay
+      if: success() || failure()
+      with:
+        name: Release Tests Results
+        # El patrón '**/*.trx' buscará el archivo en cualquier subdirectorio
+        path: '**/*.trx'
+        reporter: dotnet-trx
+        fail-on-error: true
+    # --- FIN DE LA CORRECCIÓN ---
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
       with:
+        # La ruta al archivo de cobertura sigue siendo la misma
         file: ./coverage/**/coverage.cobertura.xml
         flags: release
         name: codecov-release
         fail_ci_if_error: false
 
+    # ... el resto de los steps de este job no necesitan cambios ...
     - name: Generate coverage report
       run: |
         dotnet tool install --global dotnet-reportgenerator-globaltool --version 5.1.19
@@ -99,213 +116,3 @@ jobs:
         name: coverage-reports
         path: coverage-reports/
         retention-days: 90
-
-  publish-coverage-pages:
-    name: Publish Coverage to GitHub Pages
-    runs-on: ubuntu-latest
-    needs: test-and-analyze
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Download coverage reports
-      uses: actions/download-artifact@v4
-      with:
-        name: coverage-reports
-        path: coverage/
-
-    - name: Setup Pages
-      uses: actions/configure-pages@v5
-
-    - name: Upload coverage to Pages
-      uses: actions/upload-pages-artifact@v3
-      with:
-        path: coverage/
-
-  create-package:
-    name: Create NuGet Package
-    runs-on: ubuntu-latest
-    needs: test-and-analyze
-    outputs:
-      package-version: ${{ steps.package-info.outputs.version }}
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Get version from tag
-      id: version
-      run: |
-        if [[ $GITHUB_REF == refs/tags/* ]]; then
-          VERSION=${GITHUB_REF#refs/tags/}
-        else
-          VERSION="${{ inputs.version_tag }}"
-        fi
-        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: ${{ env.DOTNET_VERSION }}
-
-    - name: Restore dependencies
-      run: dotnet restore
-
-    - name: Create OrderProcessing package
-      run: |
-        dotnet pack \
-          --configuration ${{ env.BUILD_CONFIGURATION }} \
-          --no-build \
-          --output ./nuget-packages \
-          -p:PackageVersion=${{ steps.version.outputs.VERSION }} \
-          -p:RepositoryUrl=${{ github.server_url }}/${{ github.repository }}.git \
-          -p:RepositoryType=git \
-          -p:PublishRepositoryUrl=true \
-          -p:IncludeSymbols=true \
-          -p:SymbolPackageFormat=snupkg
-
-    - name: Get package information
-      id: package-info
-      run: |
-        PACKAGE=$(ls nuget-packages/OrderProcessing.*.nupkg | head -1)
-        VERSION=$(echo $PACKAGE | sed -n 's/.*\.\([0-9]\+\.[0-9]\+\.[0-9]\+\(-.*\)\?\)\.nupkg/\1/p')
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
-        echo "OrderProcessing version: $VERSION"
-
-    - name: Upload package as artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: nuget-packages-${{ steps.version.outputs.VERSION }}
-        path: nuget-packages/*.nupkg
-        retention-days: 90
-
-  publish-to-github-packages:
-    name: Publish to GitHub Packages
-    runs-on: ubuntu-latest
-    needs: create-package
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-
-    steps:
-    - name: Download package
-      uses: actions/download-artifact@v4
-      with:
-        name: nuget-packages-${{ needs.create-package.outputs.package-version }}
-        path: ./nuget-packages
-
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: ${{ env.DOTNET_VERSION }}
-
-    - name: Publish OrderProcessing to GitHub Packages
-      run: |
-        dotnet nuget push "./nuget-packages/OrderProcessing.*.nupkg" \
-          --api-key ${{ secrets.GITHUB_TOKEN }} \
-          --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
-          --skip-duplicate
-
-  create-github-release:
-    name: Create GitHub Release
-    runs-on: ubuntu-latest
-    needs: [test-and-analyze, create-package]
-    if: always() && (needs.test-and-analyze.result == 'success')
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Get version from tag
-      id: version
-      run: |
-        if [[ $GITHUB_REF == refs/tags/* ]]; then
-          VERSION=${GITHUB_REF#refs/tags/}
-        else
-          VERSION="${{ inputs.version_tag }}"
-        fi
-        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-
-    - name: Download package
-      uses: actions/download-artifact@v4
-      with:
-        name: nuget-packages-${{ steps.version.outputs.VERSION }}
-        path: ./nuget-packages
-
-    - name: Generate release notes
-      id: release-notes
-      run: |
-        # Get recent commits since last tag
-        if [[ $GITHUB_REF == refs/tags/* ]]; then
-          LAST_TAG=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
-          if [[ -n "$LAST_TAG" ]]; then
-            COMMITS=$(git log --oneline ${LAST_TAG}..HEAD --grep="feat\|fix\|doc\|refactor\|test" | head -20)
-          else
-            COMMITS=$(git log --oneline -20)
-          fi
-        else
-          COMMITS="Manual release: ${{ steps.version.outputs.VERSION }}"
-        fi
-
-        # Create release notes
-        NOTES="# Release ${{ steps.version.outputs.VERSION }}\n\n"
-        NOTES+="## Order Processing System\n\n"
-        NOTES+="This release contains the implementation of the **FACADE** design pattern for order processing.\n\n"
-        NOTES+="## Changes\n\n"
-        if [[ -n "$COMMITS" ]]; then
-          NOTES+="$COMMITS\n\n"
-        fi
-        NOTES+="## Package\n\n"
-        NOTES+="- **OrderProcessing** v${{ needs.create-package.outputs.package-version }}\n\n"
-        NOTES+="## Installation\n\n"
-        NOTES+="\`\`\`bash\n"
-        NOTES+="dotnet nuget add source --name github \"https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json\"\n\n"
-        NOTES+="dotnet add package OrderProcessing --version ${{ needs.create-package.outputs.package-version }}\n"
-        NOTES+="\`\`\`\n\n"
-        NOTES+="## Files\n\n"
-        for file in ./nuget-packages/*.nupkg; do
-          if [[ -f "$file" ]]; then
-            filename=$(basename "$file")
-            NOTES+="- \`$filename\`\n"
-          fi
-        done
-
-        echo "RELEASE_NOTES<<EOF" >> $GITHUB_OUTPUT
-        echo "$NOTES" >> $GITHUB_OUTPUT
-        echo "EOF" >> $GITHUB_OUTPUT
-
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: ${{ steps.version.outputs.VERSION }}
-        name: "Release ${{ steps.version.outputs.VERSION }}"
-        body: ${{ steps.release-notes.outputs.RELEASE_NOTES }}
-        files: |
-          ./nuget-packages/*.nupkg
-        generate_release_notes: false
-        draft: false
-        prerelease: ${{ contains(steps.version.outputs.VERSION, 'alpha') || contains(steps.version.outputs.VERSION, 'beta') || contains(steps.version.outputs.VERSION, 'rc') }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Create deployment for packages
-      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-      run: |
-        echo "Package deployed to GitHub Packages:"
-        echo "- OrderProcessing v${{ needs.create-package.outputs.package-version }}"
-        echo ""
-        echo "Available at: https://nuget.pkg.github.com/${{ github.repository_owner }}/"
-
-  deploy-coverage:
-    name: Deploy Coverage Reports
-    runs-on: ubuntu-latest
-    needs: publish-coverage-pages
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
-    steps:
-    - name: Deploy coverage reports to GitHub Pages
-      id: deployment
-      uses: actions/deploy-pages@v4
